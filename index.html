@@ -1,0 +1,825 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Defect Trend Dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root { --bg:#ffffff; --fg:#222; --panel:#fafafa; --border:#ddd; --muted:#555; --ok:#0a7; --warn:#c70; --bad:#c33; }
+.dark { --bg:#111; --fg:#eee; --panel:#1a1a1a; --border:#333; --muted:#bbb; }
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif;margin:20px;color:var(--fg);background:var(--bg)}
+h1{font-size:20px;margin:0 0 10px}
+.grid{display:grid;grid-template-columns:1fr 1fr;gap:20px}
+.panel{border:1px solid var(--border);border-radius:8px;padding:12px;background:var(--panel)}
+label{display:inline-block;margin-right:10px;margin-bottom:6px}
+input[type=file]{margin:6px 0 10px}
+select, input[type=number], input[type=text], input[type=date]{margin-right:10px}
+table{border-collapse:collapse;width:100%;font-size:13px}
+th,td{border:1px solid var(--border);padding:6px;text-align:right}
+th{text-align:left;background:rgba(0,0,0,0.06)}
+.small{font-size:12px;color:var(--muted)}
+.controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+button{padding:6px 10px;border:1px solid var(--border);background:#f0f0f0;border-radius:6px;cursor:pointer}
+.dark button{background:#222;border-color:#444;color:#ddd}
+.listbox{max-height:120px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:6px}
+.listbox label{display:block;margin:2px 0}
+canvas{max-height:320px}
+/* Info button + tooltip */
+.info-btn {
+display:inline-block; position:relative; cursor:pointer;
+width:18px; height:18px; border-radius:50%;
+background:#06c; color:#fff; font-weight:600; font-size:12px;
+line-height:18px; text-align:center;
+}
+.dark .info-btn { background:#39c; color:#111; }
+.info-btn .tip {
+display:none; position:absolute; top:22px; left:0; max-width:420px;
+background:var(--panel); color:var(--fg);
+border:1px solid var(--border); border-radius:6px; padding:10px;
+box-shadow:0 6px 18px rgba(0,0,0,0.25); z-index:1000;
+}
+.info-btn:hover .tip,
+.info-btn:focus .tip,
+.info-btn.open .tip { display:block; }
+.info-btn .tip strong { display:block; margin-bottom:6px }
+</style>
+</head>
+<body>
+<h1>Defect Trend Dashboard (client-side CSV)</h1>
+<div class="panel">
+<div class="controls">
+<input type="file" id="fileInput" accept=".csv" />
+<button id="processBtn">Process</button>
+<input type="file" id="fileCompare" accept=".csv" />
+<label><input type="checkbox" id="compareToggle"> Overlay compare dataset</label>
+<button id="themeBtn">Toggle dark theme</button>
+</div>
+<div class="small">Expected columns: ID, Created Date, Closed Date, Severity, Priority, Activity, State, Iteration Path, Tags</div>
+<div class="controls">
+<label>Created Date <input type="text" id="colCreated" value="Created Date"></label>
+<label>Closed Date <input type="text" id="colClosed" value="Closed Date"></label>
+<label>Severity <input type="text" id="colSeverity" value="Severity"></label>
+<label>Priority <input type="text" id="colPriority" value="Priority"></label>
+<label>Activity <input type="text" id="colActivity" value="Activity"></label>
+<label>State <input type="text" id="colState" value="State"></label>
+<label>Iteration Path <input type="text" id="colSprint" value="Iteration Path"></label>
+<label>Tags <input type="text" id="colTags" value="Tags"></label>
+</div>
+<div class="controls">
+<label>Daily MA (3) <input type="number" id="ma3" value="3" min="1" style="width:60px"></label>
+<label>Daily MA (7) <input type="number" id="ma7" value="7" min="1" style="width:60px"></label>
+<label>Poly window <input type="number" id="polyWin" value="28" min="7" style="width:70px"></label>
+<label>Logistic fit <input type="checkbox" id="logisticToggle"></label>
+<label>ETA thresholds <input type="text" id="etaThresholds" value="25,0" style="width:100px"></label>
+</div>
+<div class="controls">
+<label>From <input type="date" id="dateFrom"></label>
+<label>To <input type="date" id="dateTo"></label>
+<button id="applyFiltersBtn">Apply filters</button>
+<button id="resetFiltersBtn">Reset filters</button>
+</div>
+<div class="grid" style="margin-top:10px">
+<div class="panel">
+<div class="small">Filter by Activity</div>
+<div id="activityBox" class="listbox"></div>
+</div>
+<div class="panel">
+<div class="small">Filter by Severity</div>
+<div id="severityBox" class="listbox"></div>
+</div>
+</div>
+</div>
+<div class="grid" style="margin-top:20px">
+<div class="panel">
+<div class="controls" style="justify-content:space-between">
+<div style="display:flex;align-items:center;gap:8px">
+<h2 style="font-size:16px;margin:0">Daily openings, closures, backlog</h2>
+<span class="info-btn" tabindex="0" role="button" aria-label="Help: how to read this chart">i
+<div class="tip">
+<strong>How to read this chart</strong>
+• Left y-axis shows daily counts: openings, closures, and the moving-average of openings (MA3, MA7). Values are “bugs per day.”<br>
+• Right y-axis shows backlog size: cumulative opens minus cumulative closes at the end of each day (open bugs remaining).<br>
+• If closures exceed openings for a period, the backlog usually falls; if openings exceed closures, the backlog rises.<br>
+Example: left axis 0–6 means up to 6 bugs opened/closed per day; right axis 0–25 means backlog up to ~25 open bugs.
+</div>
+</span>
+</div>
+<div>
+<button id="exportDailyBtn">Download Daily CSV</button>
+<button id="exportDailySplitsBtn">Download Daily Splits CSV</button>
+</div>
+</div>
+<canvas id="dailyChart"></canvas>
+<div id="peakInfo" class="small"></div>
+<div id="logisticInfo" class="small"></div>
+</div>
+<div class="panel">
+<h2 style="font-size:16px;margin-top:0">Openings last 30 days</h2>
+<div class="grid">
+<div><canvas id="activityPie"></canvas></div>
+<div><canvas id="severityPie"></canvas></div>
+</div>
+</div>
+</div>
+<div class="grid" style="margin-top:20px">
+<div class="panel">
+<h2 style="font-size:16px;margin-top:0">Daily openings by Activity (stacked)</h2>
+<canvas id="dailyActivityStack"></canvas>
+</div>
+<div class="panel">
+<h2 style="font-size:16px;margin-top:0">Daily openings by Severity (stacked)</h2>
+<canvas id="dailySeverityStack"></canvas>
+</div>
+</div>
+<div class="grid" style="margin-top:20px">
+<div class="panel">
+<div class="controls" style="justify-content:space-between">
+<h2 style="font-size:16px;margin-top:0">Per-Activity burn-down</h2>
+<div>
+<select id="burnActivitySelect"></select>
+<button id="exportBurnBtn">Download Burn-down CSV</button>
+</div>
+</div>
+<canvas id="burnActivityChart"></canvas>
+<div class="small">This is backlog per Activity (cumulative opens minus cumulative closes) by day.</div>
+</div>
+<div class="panel">
+<h2 style="font-size:16px;margin-top:0">Cycle time distribution (histogram)</h2>
+<canvas id="cycleHist"></canvas>
+</div>
+</div>
+<div class="grid" style="margin-top:20px">
+<div class="panel">
+<h2 style="font-size:16px;margin-top:0">Cumulative opens vs closes</h2>
+<canvas id="cumulativeChart"></canvas>
+</div>
+<div class="panel">
+<h2 style="font-size:16px;margin-top:0">Backlog by Severity (stacked)</h2>
+<canvas id="backlogSeverityStack"></canvas>
+</div>
+</div>
+<div class="grid" style="margin-top:20px">
+<div class="panel">
+<h2 style="font-size:16px;margin-top:0">Weekly rollup</h2>
+<button id="exportWeeklyBtn">Download Weekly CSV</button>
+<table id="weeklyTable"><thead><tr>
+<th>Week start</th><th>Openings</th><th>Closures</th><th>Backlog end</th>
+</tr></thead><tbody></tbody></table>
+</div>
+<div class="panel">
+<h2 style="font-size:16px;margin-top:0">Sprint rollup</h2>
+<button id="exportSprintBtn">Download Sprint CSV</button>
+<table id="sprintTable"><thead><tr>
+<th>Iteration Path</th><th>Openings</th><th>Closures</th><th>Backlog change</th>
+</tr></thead><tbody></tbody></table>
+</div>
+</div>
+<div class="panel" style="margin-top:20px">
+<h2 style="font-size:16px;margin-top:0">Tags breakdown (last 30 days)</h2>
+<canvas id="tagsBar"></canvas>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+let rawRows = [], compareRows = [], items=[], itemsCompare=[];
+let filters = { from:null, to:null, activities:new Set(), severities:new Set() };
+let charts = { daily:null, activityPie:null, severityPie:null, tagsBar:null,
+dailyActStack:null, dailySevStack:null, burn:null, cycleHist:null, cumulative:null, backlogSevStack:null };
+let seriesCache = {}; // for export
+let perActivityBurnData = {}; // for burn-down export
+
+(function initSettings(){
+const storedTheme = localStorage.getItem('defectsTheme');
+if(storedTheme==='dark') document.body.classList.add('dark');
+['colCreated','colClosed','colSeverity','colPriority','colActivity','colState','colSprint','colTags','ma3','ma7','polyWin','etaThresholds']
+.forEach(id=>{ const v = localStorage.getItem(id); if(v) document.getElementById(id).value = v; });
+const logT = localStorage.getItem('logisticToggle'); if(logT) document.getElementById('logisticToggle').checked = (logT==='true');
+})();
+document.getElementById('themeBtn').onclick = ()=>{
+document.body.classList.toggle('dark');
+localStorage.setItem('defectsTheme', document.body.classList.contains('dark')?'dark':'light');
+};
+['colCreated','colClosed','colSeverity','colPriority','colActivity','colState','colSprint','colTags','ma3','ma7','polyWin','etaThresholds','logisticToggle']
+.forEach(id=>{
+const el = document.getElementById(id);
+el.addEventListener(el.type==='checkbox'?'change':'input', ()=> localStorage.setItem(id, el.type==='checkbox'?el.checked:el.value));
+});
+
+document.getElementById('processBtn').onclick = () => {
+const file = document.getElementById('fileInput').files[0];
+if (!file) { alert('Please choose a CSV file'); return; }
+Papa.parse(file, { header: true, skipEmptyLines:'greedy',
+complete: res => {
+rawRows = res.data;
+compareRows = [];
+document.getElementById('compareToggle').checked=false;
+resetFilterInputs(); // ensure filters reset for new dataset
+buildAndRender();
+}
+});
+};
+document.getElementById('fileCompare').onchange = ()=>{
+const file = document.getElementById('fileCompare').files[0];
+if (!file) return;
+Papa.parse(file, { header: true, skipEmptyLines:'greedy',
+complete: res => { compareRows = res.data; if(items.length) buildAndRender(); }
+});
+};
+document.getElementById('applyFiltersBtn').onclick = ()=> buildAndRender();
+document.getElementById('resetFiltersBtn').onclick = ()=>{
+document.getElementById('dateFrom').value='';
+document.getElementById('dateTo').value='';
+resetFilterInputs();
+buildAndRender();
+};
+
+function resetFilterInputs(){
+filters.activities.clear(); filters.severities.clear();
+// Re-check all boxes
+document.querySelectorAll('#activityBox input[type=checkbox]').forEach(cb=>cb.checked=true);
+document.querySelectorAll('#severityBox input[type=checkbox]').forEach(cb=>cb.checked=true);
+}
+
+// Export buttons
+document.getElementById('exportDailyBtn').onclick = ()=> exportCSV(seriesCache.daily, 'daily_openings_closures_backlog.csv');
+document.getElementById('exportDailySplitsBtn').onclick = ()=> exportCSV(seriesCache.dailySplits, 'daily_splits_activity_severity.csv');
+document.getElementById('exportWeeklyBtn').onclick = ()=> exportCSV(seriesCache.weekly, 'weekly_rollup.csv');
+document.getElementById('exportSprintBtn').onclick = ()=> exportCSV(seriesCache.sprint, 'sprint_rollup.csv');
+document.getElementById('exportBurnBtn').onclick = ()=>{
+const sel = document.getElementById('burnActivitySelect').value;
+const rows = perActivityBurnData[sel];
+if(!rows){ alert('No data to export for '+sel); return; }
+exportCSV(rows, `burn_down_${sel.replace(/\s+/g,'_')}.csv`);
+};
+
+function buildAndRender(){
+const col = getColMap();
+items = parseRows(rawRows, col);
+itemsCompare = compareRows.length ? parseRows(compareRows, col) : [];
+buildFilterLists(items); // always rebuild lists to reflect current dataset
+filters.from = dateFromInput(); filters.to = dateToInput();
+filters.activities = selectedFromBox('activityBox'); filters.severities = selectedFromBox('severityBox');
+const filtered = applyFilters(items, filters);
+const s = buildSeries(filtered);
+seriesCache.daily = s.dailyExport;
+seriesCache.dailySplits = s.dailySplitsExport;
+seriesCache.weekly = s.weeklyExport;
+seriesCache.sprint = s.sprintExport;
+perActivityBurnData = s.burnExports; // {activity: rows}
+renderAll(s, filtered);
+}
+
+function getColMap(){
+return {
+created: val('colCreated'), closed: val('colClosed'),
+severity: val('colSeverity'), priority: val('colPriority'),
+activity: val('colActivity'), state: val('colState'),
+sprint: val('colSprint'), tags: val('colTags')
+};
+}
+function val(id){ return document.getElementById(id).value.trim(); }
+function parseRows(rows, col){
+return rows.map(r=>{
+const created = parseNZDate(r[col.created]);
+const closed = r[col.closed] ? parseNZDate(r[col.closed]) : null;
+return {
+created, closed,
+severity: (r[col.severity]||'').toString(),
+priority: (r[col.priority]||'').toString(),
+activity: (r[col.activity]||'').toString(),
+state: (r[col.state]||'').toString(),
+sprint: (r[col.sprint]||'').toString(),
+tags: (r[col.tags]||'').toString()
+};
+}).filter(x=>x.created instanceof Date && !isNaN(x.created));
+}
+
+function buildFilterLists(items){
+const acts = Array.from(new Set(items.map(it=>it.activity))).sort();
+const sevs = Array.from(new Set(items.map(it=>normSeverity(it.severity)))).sort((a,b)=>parseInt(a)-parseInt(b));
+const actBox = document.getElementById('activityBox');
+const sevBox = document.getElementById('severityBox');
+
+// Always rebuild the lists and default to all checked
+actBox.innerHTML = acts.map(a=>`<label><input type="checkbox" value="${escapeHtml(a)}" checked> ${escapeHtml(a||'(blank)')}</label>`).join('');
+sevBox.innerHTML = sevs.map(s=>`<label><input type="checkbox" value="${escapeHtml(s)}" checked> ${escapeHtml(s)}</label>`).join('');
+
+// Preserve burn-down selection if possible
+const sel = document.getElementById('burnActivitySelect');
+const prev = sel.value;
+sel.innerHTML = acts.map(a=>`<option value="${escapeHtml(a)}">${escapeHtml(a||'(blank)')}</option>`).join('');
+if(prev && acts.includes(prev)) sel.value = prev; else if(acts.length) sel.value = acts[0];
+}
+
+function selectedFromBox(id){
+const set = new Set();
+document.querySelectorAll(`#${id} input[type=checkbox]`).forEach(cb=>{ if(cb.checked) set.add(cb.value); });
+return set;
+}
+function dateFromInput(){ const s = document.getElementById('dateFrom').value; return s ? new Date(s+'T00:00:00') : null; }
+function dateToInput(){ const s = document.getElementById('dateTo').value; return s ? new Date(s+'T23:59:59') : null; }
+
+function applyFilters(items, f){
+return items.filter(it=>{
+if(f.from && it.created < f.from) return false;
+if(f.to && it.created > f.to) return false;
+if(f.activities.size && !f.activities.has(it.activity)) return false;
+const sev = normSeverity(it.severity);
+if(f.severities.size && !f.severities.has(sev)) return false;
+return true;
+});
+}
+
+function buildSeries(items){
+const byDay = {}, byDayActivity={}, byDaySeverity={}, byDayActivityClose={}, byDaySeverityClose={}, allDates=new Set();
+items.forEach(it=>{
+const dOpen = ymd(it.created); allDates.add(dOpen);
+byDay[dOpen] = byDay[dOpen] || {open:0, close:0};
+byDay[dOpen].open += 1;
+byDayActivity[dOpen] = byDayActivity[dOpen] || {};
+byDayActivity[dOpen][it.activity] = (byDayActivity[dOpen][it.activity]||0)+1;
+const sev = normSeverity(it.severity);
+byDaySeverity[dOpen] = byDaySeverity[dOpen] || {};
+byDaySeverity[dOpen][sev] = (byDaySeverity[dOpen][sev]||0)+1;
+if(it.closed){
+const dClose = ymd(it.closed); allDates.add(dClose);
+byDay[dClose] = byDay[dClose] || {open:0, close:0};
+byDay[dClose].close += 1;
+// closures by activity/severity
+byDayActivityClose[dClose] = byDayActivityClose[dClose] || {};
+byDayActivityClose[dClose][it.activity] = (byDayActivityClose[dClose][it.activity]||0)+1;
+byDaySeverityClose[dClose] = byDaySeverityClose[dClose] || {};
+byDaySeverityClose[dClose][sev] = (byDaySeverityClose[dClose][sev]||0)+1;
+}
+});
+const dates = Array.from(allDates).sort();
+if(dates.length===0) return emptySeries();
+const fullDates = fillDateRange(dates[0], dates[dates.length-1]);
+
+// Overall series
+let openings=[], closures=[], backlog=[], cumOpen=0, cumClose=0, cumOpenSeries=[], cumCloseSeries=[];
+const ma3 = parseInt(val('ma3'))||3, ma7 = parseInt(val('ma7'))||7;
+fullDates.forEach(d=>{
+const o = byDay[d]?.open||0, c = byDay[d]?.close||0;
+cumOpen += o; cumClose += c;
+openings.push(o); closures.push(c); backlog.push(cumOpen - cumClose);
+cumOpenSeries.push(cumOpen); cumCloseSeries.push(cumClose);
+});
+const ma3Open = movingAverage(openings, ma3);
+const ma7Open = movingAverage(openings, ma7);
+const polyWin = parseInt(val('polyWin'))||28;
+const peak = estimatePeak(fullDates, ma7Open, polyWin);
+const logisticEnabled = document.getElementById('logisticToggle').checked;
+const logistic = logisticEnabled ? logisticFit(fullDates, cumOpenSeries) : null;
+
+// Stacked daily: Activity and Severity
+const allActivities = Array.from(new Set(items.map(it=>it.activity))).sort();
+const allSeverities = Array.from(new Set(items.map(it=>normSeverity(it.severity)))).sort((a,b)=>parseInt(a)-parseInt(b));
+const dailyActivityStack = allActivities.map(a=> fullDates.map(d=> (byDayActivity[d]?.[a])||0 ));
+const dailySeverityStack = allSeverities.map(s=> fullDates.map(d=> (byDaySeverity[d]?.[s])||0 ));
+
+// Backlog by Severity (stacked)
+const backlogSev = {};
+let cumOpenSev = {}, cumCloseSev = {};
+allSeverities.forEach(s=>{ cumOpenSev[s]=0; cumCloseSev[s]=0; backlogSev[s]=[]; });
+fullDates.forEach(d=>{
+const openMap = byDaySeverity[d]||{};
+const closeMap= byDaySeverityClose[d]||{};
+allSeverities.forEach(s=>{
+cumOpenSev[s] += (openMap[s]||0);
+cumCloseSev[s]+= (closeMap[s]||0);
+backlogSev[s].push(cumOpenSev[s]-cumCloseSev[s]);
+});
+});
+
+// Per-Activity burn-down (backlog per Activity by day)
+const burnData = {};
+const burnExports = {};
+allActivities.forEach(a=> burnData[a]=[]);
+let cumOpenAct={}, cumCloseAct={};
+allActivities.forEach(a=>{ cumOpenAct[a]=0; cumCloseAct[a]=0; });
+fullDates.forEach(d=>{
+const oMap = byDayActivity[d]||{}, cMap = byDayActivityClose[d]||{};
+allActivities.forEach(a=>{
+cumOpenAct[a] += (oMap[a]||0);
+cumCloseAct[a]+= (cMap[a]||0);
+burnData[a].push(cumOpenAct[a]-cumCloseAct[a]);
+});
+});
+// Prepare CSV exports for burn-down
+allActivities.forEach(a=>{
+burnExports[a] = [['date','backlog_'+a]].concat(fullDates.map((d,i)=>[d, burnData[a][i]]));
+});
+
+// Cycle time
+const cycleDays = items.filter(it=>it.closed).map(it=>daysBetween(it.created, it.closed)).sort((a,b)=>a-b);
+const med = percentile(cycleDays,50), p90 = percentile(cycleDays,90);
+const cycleHist = buildHistogram(cycleDays, 20); // bins, counts
+
+// weekly rollup
+const weekly = rollupWeekly(fullDates, openings, closures, backlog);
+// sprint rollup
+const sprintAgg = {};
+items.forEach(it=>{
+const s = it.sprint || '(none)';
+sprintAgg[s] = sprintAgg[s] || {open:0, close:0};
+sprintAgg[s].open += 1; if(it.closed) sprintAgg[s].close += 1;
+});
+
+// ETAs
+const windowForVelocity = 14;
+const avgOpen = mean(openings.slice(-windowForVelocity));
+const avgClose= mean(closures.slice(-windowForVelocity));
+const currentBacklog = backlog[backlog.length-1];
+const thresholds = val('etaThresholds').split(',').map(x=>parseInt(x.trim())).filter(x=>!isNaN(x));
+const eta = thresholds.map(t=>{
+if(avgClose<=avgOpen) return {threshold:t, days:null, net:(avgClose-avgOpen)};
+const net = avgClose-avgOpen;
+const days = Math.max(0, Math.ceil((currentBacklog - t)/net));
+return {threshold:t, days, net};
+});
+
+// compare overlay
+let compareSeries=null;
+if(compareRows.length && document.getElementById('compareToggle').checked){
+const compItems = applyFilters(itemsCompare, filters);
+const compDay = {}; compItems.forEach(it=>{ const d=ymd(it.created); compDay[d]=(compDay[d]||0)+1; });
+const compOpen = fullDates.map(d=> compDay[d]||0);
+const compMa7 = movingAverage(compOpen, ma7);
+compareSeries = { openings: compOpen, ma7: compMa7 };
+}
+
+// exports
+const dailyExport = [['date','openings','closures','backlog','ma3_open','ma7_open']].concat(
+fullDates.map((d,i)=>[d, openings[i], closures[i], backlog[i], round(ma3Open[i]), round(ma7Open[i])])
+);
+const dailySplitsExport = [['date'].concat(allActivities.map(a=>'act:'+a)).concat(allSeverities.map(s=>'sev:'+s))];
+fullDates.forEach(d=>{
+const row=[d];
+allActivities.forEach(a=> row.push( (byDayActivity[d]?.[a])||0 ));
+allSeverities.forEach(s=> row.push( (byDaySeverity[d]?.[s])||0 ));
+dailySplitsExport.push(row);
+});
+const weeklyExport = [['week_start','openings','closures','backlog_end']].concat(
+weekly.map(w=>[w.weekStart,w.openings,w.closures,w.backlogEnd])
+);
+const sprintExport = [['iteration_path','openings','closures','backlog_change']].concat(
+Object.keys(sprintAgg).sort().map(s=>[s, sprintAgg[s].open, sprintAgg[s].close, sprintAgg[s].close - sprintAgg[s].open])
+);
+
+return {
+labels: fullDates, openings, closures, backlog, ma3Open, ma7Open, peak, logistic,
+actAgg: last30Agg(fullDates, byDayActivity), sevAgg: last30Agg(fullDates, byDaySeverity),
+tagsAgg: last30TagsAgg(items, fullDates),
+weekly, sprintAgg,
+cycle:{med,p90,count:cycleDays.length, hist:cycleHist},
+cumulative:{open:cumOpenSeries, close:cumCloseSeries},
+eta:{currentBacklog, avgOpen, avgClose, thresholds:eta},
+compareSeries,
+dailyExport, weeklyExport, sprintExport, dailySplitsExport,
+stacks:{activities:dailyActivityStack, activityLabels:allActivities, severities:dailySeverityStack, severityLabels:allSeverities},
+burn:{data:burnData, activities:allActivities}, burnExports,
+backlogSev:{series:backlogSev, labels:allSeverities}
+};
+}
+
+function last30Agg(fullDates, byMap){
+const lastDates = fullDates.slice(-30);
+const agg={};
+lastDates.forEach(d=>{
+const m = byMap[d]||{};
+Object.keys(m).forEach(k=>{ agg[k]=(agg[k]||0)+m[k]; });
+});
+return agg;
+}
+function last30TagsAgg(items, fullDates){
+const lastDates = new Set(fullDates.slice(-30));
+const agg={};
+items.filter(it=> lastDates.has(ymd(it.created))).forEach(it=>{
+const tags = (it.tags||'').split(/[,;]+/).map(t=>t.trim()).filter(Boolean);
+tags.forEach(t=>{ agg[t]=(agg[t]||0)+1; });
+});
+return agg;
+}
+
+function renderAll(s, items){
+renderDailyChart(s.labels, s.openings, s.closures, s.backlog, s.ma3Open, s.ma7Open, s.compareSeries);
+renderPie('activityPie', s.actAgg, 'Openings by Activity (last 30 days)');
+renderPie('severityPie', s.sevAgg, 'Openings by Severity (last 30 days)');
+renderTagsBar(s.tagsAgg);
+renderStacked('dailyActivityStack', s.labels, s.stacks.activities, s.stacks.activityLabels, 'Daily openings by Activity');
+renderStacked('dailySeverityStack', s.labels, s.stacks.severities, s.stacks.severityLabels, 'Daily openings by Severity');
+
+// Burn-down selector and chart
+const sel = document.getElementById('burnActivitySelect');
+if(!sel.dataset.bound){ sel.onchange = ()=> renderBurn(s); sel.dataset.bound='1'; }
+if(!sel.value && s.burn.activities.length){ sel.value = s.burn.activities[0]; }
+renderBurn(s);
+
+// Cycle histogram
+renderCycleHist(s.cycle.hist.bins, s.cycle.hist.counts);
+
+// Cumulative
+renderCumulative(s.labels, s.cumulative.open, s.cumulative.close);
+
+// Backlog by severity stacked
+const sevLabels = Object.keys(s.backlogSev.series);
+const dataSets = sevLabels.map((sev,i)=> ({
+label:'Severity '+sev,
+data: s.backlogSev.series[sev],
+borderColor: `hsl(${(i*47)%360} 70% 55%)`,
+backgroundColor: `hsla(${(i*47)%360},70%,55%,0.25)`,
+fill: true,
+stack: 'stack1',
+tension:0.2
+}));
+renderStackedLine('backlogSeverityStack', s.labels, dataSets);
+
+// Peak info
+document.getElementById('peakInfo').innerHTML = s.peak ? (
+`Estimated peak (7-day MA, window ${s.peak.window}): ${s.peak.date} (height ~${s.peak.height.toFixed(1)}). `+
+(s.peak.declineStart ? `Decline start: ${s.peak.declineStart}.` : 'Decline start not detected.')
+) : 'No peak detected in the window.';
+document.getElementById('logisticInfo').innerHTML = s.logistic ? (
+`Logistic cumulative fit: inflection ~ ${s.logistic.inflectionDate}; asymptote K ≈ ${Math.round(s.logistic.K)}; R² ≈ ${s.logistic.R2.toFixed(3)}.`
+) : '';
+
+// Weekly table
+const wtbody = document.querySelector('#weeklyTable tbody'); wtbody.innerHTML='';
+s.weekly.forEach(w=>{
+const tr = document.createElement('tr');
+tr.innerHTML = `<td style="text-align:left">${w.weekStart}</td><td>${w.openings}</td><td>${w.closures}</td><td>${w.backlogEnd}</td>`;
+wtbody.appendChild(tr);
+});
+// Sprint table
+const stbody = document.querySelector('#sprintTable tbody'); stbody.innerHTML='';
+Object.keys(s.sprintAgg).sort().forEach(sp=>{
+const o = s.sprintAgg[sp].open||0, c = s.sprintAgg[sp].close||0;
+const tr = document.createElement('tr');
+tr.innerHTML = `<td style="text-align:left">${sp}</td><td>${o}</td><td>${c}</td><td>${c-o}</td>`;
+stbody.appendChild(tr);
+});
+}
+
+function renderDailyChart(labels, openings, closures, backlog, ma3, ma7, compareSeries){
+if(charts.daily) charts.daily.destroy();
+const ctx = document.getElementById('dailyChart');
+const datasets = [
+{label:'Openings', data: openings, borderColor:'#c33', backgroundColor:'rgba(195,51,51,0.1)', tension:0.2},
+{label:'Closures', data: closures, borderColor:'#0a7', backgroundColor:'rgba(10,167,110,0.1)', tension:0.2},
+{label:'Backlog', data: backlog, borderColor:'#555', backgroundColor:'rgba(85,85,85,0.1)', tension:0.2, yAxisID:'y1'},
+{label:'MA3 openings', data: ma3, borderColor:'#f90', borderDash:[4,2], pointRadius:0, tension:0.2},
+{label:'MA7 openings', data: ma7, borderColor:'#06c', borderDash:[2,2], pointRadius:0, tension:0.2}
+];
+if(compareSeries){
+datasets.push({label:'Compare openings', data: compareSeries.openings, borderColor:'#6a3', backgroundColor:'rgba(106,163,51,0.1)', tension:0.2});
+datasets.push({label:'Compare MA7', data: compareSeries.ma7, borderColor:'#39c', borderDash:[6,3], pointRadius:0, tension:0.2});
+}
+charts.daily = new Chart(ctx, {
+type:'line',
+data:{ labels, datasets },
+options:{
+responsive:true,
+scales:{
+y:{beginAtZero:true, title:{display:true, text:'Daily counts (openings, closures, MA)'}},
+y1:{beginAtZero:true, position:'right', title:{display:true, text:'Backlog (opens − closes)'}}
+},
+plugins:{ legend:{display:true} }
+}
+});
+}
+function renderPie(id, agg, title){
+const labels = Object.keys(agg).sort();
+const data = labels.map(k=>agg[k]);
+const colors = labels.map((_,i)=>`hsl(${(i*47)%360} 70% 55%)`);
+const ctx = document.getElementById(id);
+if(id==='activityPie' && charts.activityPie) charts.activityPie.destroy();
+if(id==='severityPie' && charts.severityPie) charts.severityPie.destroy();
+const pie = new Chart(ctx, { type:'pie', data:{ labels, datasets:[{data, backgroundColor:colors}] }, options:{ plugins:{ title:{display:true,text:title} } } });
+if(id==='activityPie') charts.activityPie = pie; else charts.severityPie = pie;
+}
+function renderTagsBar(agg){
+if(charts.tagsBar) charts.tagsBar.destroy();
+const labels = Object.keys(agg).sort((a,b)=> agg[b]-agg[a]).slice(0,15);
+const data = labels.map(l=>agg[l]);
+const colors = labels.map((_,i)=>`hsl(${(i*37)%360} 70% 55%)`);
+charts.tagsBar = new Chart(document.getElementById('tagsBar'), {
+type:'bar', data:{ labels, datasets:[{label:'Tag count (last 30 days)', data, backgroundColor:colors}] },
+options:{ responsive:true, plugins:{ legend:{display:false} }, scales:{ y:{beginAtZero:true} } }
+});
+}
+function renderStacked(canvasId, labels, seriesList, names, title){
+if(charts[canvasId]) charts[canvasId].destroy();
+const colors = names.map((_,i)=>`hsl(${(i*37)%360} 70% 55%)`);
+const datasets = seriesList.map((s,i)=>({ label:names[i]||`Series ${i+1}`, data:s, backgroundColor:colors[i], stack:'stack', borderWidth:0 }));
+charts[canvasId] = new Chart(document.getElementById(canvasId), {
+type:'bar',
+data:{ labels, datasets },
+options:{ responsive:true, plugins:{ title:{display:true,text:title}, legend:{display:true} }, scales:{ x:{stacked:true}, y:{stacked:true, beginAtZero:true} } }
+});
+}
+function renderBurn(s){
+if(charts.burn) charts.burn.destroy();
+const sel = document.getElementById('burnActivitySelect').value;
+if(!sel) return;
+const data = s.burn.data[sel];
+charts.burn = new Chart(document.getElementById('burnActivityChart'), {
+type:'line',
+data:{ labels: s.labels, datasets:[{ label:`Backlog (${sel})`, data, borderColor:'#c33', backgroundColor:'rgba(195,51,51,0.1)', tension:0.2 }] },
+options:{ responsive:true, scales:{ y:{beginAtZero:true} } }
+});
+}
+function renderCycleHist(bins, counts){
+if(charts.cycleHist) charts.cycleHist.destroy();
+charts.cycleHist = new Chart(document.getElementById('cycleHist'), {
+type:'bar',
+data:{ labels: bins.map(b=> `${b.lo}-${b.hi}`), datasets:[{ label:'Items', data:counts, backgroundColor:'#06c' }] },
+options:{ responsive:true, scales:{ y:{beginAtZero:true} }, plugins:{ legend:{display:false} } }
+});
+}
+function renderCumulative(labels, cumOpen, cumClose){
+if(charts.cumulative) charts.cumulative.destroy();
+charts.cumulative = new Chart(document.getElementById('cumulativeChart'), {
+type:'line',
+data:{ labels, datasets:[
+{label:'Cumulative opens', data:cumOpen, borderColor:'#c33', backgroundColor:'rgba(195,51,51,0.08)', tension:0.2},
+{label:'Cumulative closes', data:cumClose, borderColor:'#0a7', backgroundColor:'rgba(10,167,110,0.08)', tension:0.2}
+] },
+options:{ responsive:true, scales:{ y:{beginAtZero:true} }, plugins:{ legend:{display:true} } }
+});
+}
+function renderStackedLine(canvasId, labels, datasets){
+if(charts[canvasId]) charts[canvasId].destroy();
+charts[canvasId] = new Chart(document.getElementById(canvasId), {
+type:'line',
+data:{ labels, datasets },
+options:{ responsive:true, scales:{ x:{stacked:true}, y:{stacked:true, beginAtZero:true} }, plugins:{ legend:{display:true} } }
+});
+}
+
+// Utility and math
+function parseNZDate(s){
+if(!s) return null;
+const parts = s.trim().split(/\s+/);
+const dmy = parts[0], time = parts[1]||'00:00:00', ampm = (parts[2]||'').toLowerCase();
+const [dd, MM, yyyy] = dmy.split('/').map(n=>parseInt(n,10));
+let [hh, mm, ss] = time.split(':').map(n=>parseInt(n,10));
+if(ampm==='pm' && hh<12) hh+=12;
+if(ampm==='am' && hh===12) hh=0;
+if(isNaN(ss)) ss=0;
+return new Date(yyyy, MM-1, dd, hh||0, mm||0, ss||0);
+}
+function ymd(dt){ const y=dt.getFullYear(), m=('0'+(dt.getMonth()+1)).slice(-2), d=('0'+dt.getDate()).slice(-2); return `${y}-${m}-${d}`;}
+function fillDateRange(start, end){ const s=new Date(start), e=new Date(end), out=[]; for(let d=new Date(s); d<=e; d.setDate(d.getDate()+1)) out.push(ymd(d)); return out; }
+function movingAverage(arr, win){ const out=[]; for(let i=0;i<arr.length;i++){ const a=Math.max(0,i-win+1), b=i+1; out.push(mean(arr.slice(a,b))); } return out; }
+function mean(a){ return a.length ? a.reduce((x,y)=>x+y,0)/a.length : 0; }
+function daysBetween(a,b){ return (b - a)/(1000*60*60*24); }
+function percentile(sorted,p){ if(!sorted.length) return null; const idx=(p/100)*(sorted.length-1); const lo=Math.floor(idx), hi=Math.ceil(idx); if(lo===hi) return sorted[lo]; const w=idx-lo; return sorted[lo]*(1-w)+sorted[hi]*w; }
+function normSeverity(s){ const m = /^(\d+)/.exec(s||''); return m ? m[1] : (s||'Unknown'); }
+function cumulative(arr){ const out=[]; let c=0; for(let i=0;i<arr.length;i++){ c+=arr[i]; out.push(c);} return out; }
+function round(x){ return Math.round(x*100)/100; }
+function escapeHtml(s){ return (s||'').replace(/[&<>"']/g,m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m])); }
+function rollupWeekly(dates, openings, closures, backlog){
+const out=[], byWeek={};
+dates.forEach((d,i)=>{
+const dt = new Date(d), day = dt.getDay(), monday=new Date(dt);
+const delta=(day+6)%7; monday.setDate(dt.getDate()-delta);
+const key = ymd(monday);
+byWeek[key] = byWeek[key] || {o:0,c:0,last:0};
+byWeek[key].o += openings[i]; byWeek[key].c += closures[i]; byWeek[key].last = backlog[i];
+});
+Object.keys(byWeek).sort().forEach(k=> out.push({weekStart:k, openings:byWeek[k].o, closures:byWeek[k].c, backlogEnd:byWeek[k].last}));
+return out.slice(-12);
+}
+function estimatePeak(labels, series, windowDays){
+if(series.length<3) return null;
+const n=series.length, w=Math.min(windowDays,n), start=n-w;
+const xs=[], ys=[]; for(let i=start;i<n;i++){ xs.push(i-start); ys.push(series[i]); }
+const fit = quadraticFit(xs,ys); if(!fit || fit.a>=0) return null;
+const tstar = -fit.b/(2*fit.a); if(tstar<0 || tstar>xs[xs.length-1]) return null;
+const idx = start + Math.round(tstar);
+const date = labels[Math.min(Math.max(idx,0), labels.length-1)];
+const slopes = localSlopes(ys);
+let declineStart=null;
+for(let i=Math.round(tstar)+1;i<ys.length-3;i++){
+if(slopes[i]<0 && slopes[i+1]<0 && slopes[i+2]<0){ declineStart = labels[start+i]; break; }
+}
+return {date, height: series[Math.min(Math.max(idx,0), series.length-1)], window:w, declineStart};
+}
+function quadraticFit(x,y){
+const n=x.length; if(n<3) return null;
+let Sx=0,Sx2=0,Sx3=0,Sx4=0,Sy=0,Sxy=0,Sx2y=0;
+for(let i=0;i<n;i++){
+const xi=x[i], yi=y[i], xi2=xi*xi, xi3=xi2*xi, xi4=xi2*xi2;
+Sx+=xi; Sx2+=xi2; Sx3+=xi3; Sx4+=xi4; Sy+=yi; Sxy+=xi*yi; Sx2y+=xi2*yi;
+}
+function det3(a,b,c,d,e,f,g,h,i){ return a*(e*i - f*h) - b*(d*i - f*g) + c*(d*h - e*g); }
+const D = det3(Sx4,Sx3,Sx2, Sx3,Sx2,Sx, Sx2,Sx,n);
+const Da = det3(Sx2y,Sx3,Sx2, Sxy,Sx2,Sx, Sy,Sx,n);
+const Db = det3(Sx4,Sx2y,Sx2, Sx3,Sxy,Sx, Sx2,Sy,n);
+const Dc = det3(Sx4,Sx3,Sx2y, Sx3,Sx2,Sxy, Sx2,Sx,Sy);
+if(Math.abs(D)<1e-9) return null;
+const a=Da/D, b=Db/D, c=Dc/D;
+return {a,b,c};
+}
+function localSlopes(y){ const s=[]; for(let i=1;i<y.length;i++) s[i]=y[i]-y[i-1]; s[0]=0; return s; }
+
+// Logistic fit: y(t) ≈ K / (1 + exp(-r*(t - t0))) via linearization
+function logisticFit(labels, cum){
+const n = cum.length; if(n<10) return null;
+const t = [...Array(n).keys()];
+const Kguess = cum[n-1]*1.1; // headroom
+const Y = cum.map(y=> Math.log((Kguess/y) - 1));
+if(Y.some(v=>!isFinite(v))) return null;
+const {a,b} = linearRegression(t, Y);
+const r = -b, t0 = a/b;
+const pred = t.map(tt=> Kguess / (1 + Math.exp(-r*(tt - t0))));
+const R2 = rSquared(cum, pred);
+const idx = Math.round(t0);
+const inflectionDate = labels[Math.min(Math.max(idx,0), labels.length-1)];
+return {K:Kguess, r, t0, R2, inflectionDate};
+}
+function linearRegression(x,y){
+const n=x.length; let sx=0, sy=0, sxx=0, sxy=0;
+for(let i=0;i<n;i++){ sx+=x[i]; sy+=y[i]; sxx+=x[i]*x[i]; sxy+=x[i]*y[i]; }
+const denom = n*sxx - sx*sx; if(Math.abs(denom)<1e-9) return {a:0,b:0};
+const b = (n*sxy - sx*sy)/denom;
+const a = (sy - b*sx)/n;
+return {a,b};
+}
+function rSquared(yTrue, yPred){
+const meanY = mean(yTrue);
+let ssTot=0, ssRes=0;
+for(let i=0;i<yTrue.length;i++){
+ssTot += (yTrue[i]-meanY)*(yTrue[i]-meanY);
+ssRes += (yTrue[i]-yPred[i])*(yTrue[i]-yPred[i]);
+}
+return ssTot>0 ? 1 - ssRes/ssTot : 0;
+}
+function buildHistogram(values, binsCount){
+if(!values.length) return {bins:[], counts:[]};
+const min = Math.min(...values), max = Math.max(...values);
+const width = (max - min) / binsCount || 1;
+const bins = []; const counts = Array(binsCount).fill(0);
+for(let i=0;i<binsCount;i++){ bins.push({lo: +(min + i*width).toFixed(1), hi: +(min + (i+1)*width).toFixed(1)}); }
+values.forEach(v=>{
+let idx = Math.floor((v - min)/width);
+if(idx<0) idx=0; if(idx>=binsCount) idx=binsCount-1;
+counts[idx] += 1;
+});
+return {bins, counts};
+}
+function exportCSV(rows, filename){
+if(!rows || !rows.length){ alert('No data to export'); return; }
+const csv = rows.map(r=> r.map(v=> String(v).includes(',') ? `"${String(v).replace(/"/g,'""')}"` : v ).join(',')).join('\n');
+const blob = new Blob([csv], {type:'text/csv'});
+const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = filename; a.click();
+URL.revokeObjectURL(a.href);
+}
+
+// Info tooltip toggle (mobile + click-away + keyboard)
+document.addEventListener('click', (e)=>{
+const btn = e.target.closest('.info-btn');
+// Toggle if clicking the info button
+if (btn) {
+btn.classList.toggle('open');
+return;
+}
+// Close any open tooltips when clicking elsewhere
+document.querySelectorAll('.info-btn.open').forEach(el=> el.classList.remove('open'));
+});
+document.addEventListener('keydown', (e)=>{
+const btn = document.activeElement && document.activeElement.classList && document.activeElement.classList.contains('info-btn') ? document.activeElement : null;
+if(!btn) return;
+if(e.key==='Enter' || e.key===' '){
+e.preventDefault();
+btn.classList.toggle('open');
+}
+});
+
+// Auto-load CSV from URL parameters (csvUrl, optional compareCsvUrl)
+(function autoLoadFromParams(){
+const params = new URLSearchParams(window.location.search);
+const csvUrl = params.get('csvUrl');
+const compareCsvUrl = params.get('compareCsvUrl');
+if(csvUrl){
+Papa.parse(csvUrl, { download:true, header:true, skipEmptyLines:'greedy',
+complete: res => {
+rawRows = res.data;
+if(compareCsvUrl){
+Papa.parse(compareCsvUrl, { download:true, header:true, skipEmptyLines:'greedy',
+complete: res2 => { compareRows = res2.data; resetFilterInputs(); buildAndRender(); }
+});
+} else {
+compareRows = [];
+resetFilterInputs();
+buildAndRender();
+}
+},
+error: err => { console.error('CSV load error', err); alert('Failed to load CSV from URL.'); }
+});
+}
+})();
+</script>
+</body>
+</html>
